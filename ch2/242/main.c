@@ -1,5 +1,7 @@
 
 int div16(int x)
 {
-    return x >> 4;
+    return (x + ((x >> 31) & 0xF)) >> 4;
 }
+
+
