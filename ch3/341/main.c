@@ -8,7 +8,7 @@ struct test
     short y;
   } s;
   struct test* next;
-}
+};
 
 void st_init(struct test* st)
 {
