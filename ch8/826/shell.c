@@ -1,47 +1,17 @@
-#include "csapp.h"
-#include "jobs.h"
+#include "shell.h"
 #define MAXARGS 128
 
+char cmdline[MAXLINE];
+int fgpgid = 0;
 extern job_lst* jlst;
-static pid_t fgpgid = 0;
-char fg_cmd[MAXLINE];
 
-void eval(char* cmdline);
-int parseline(char* buf, char** argv);
-int builtin_command(char** argv);
-void sigint_handler(int sig);
-void sigtstp_handler(int sig);
-void cont_proc(char** argv, int g);
-void reap(int sig);
-
-int main(void)
-{
-  char cmdline[MAXLINE];
-
-  signal(SIGINT, sigint_handler);
-  signal(SIGTSTP, sigtstp_handler);
-  signal(SIGCHLD, reap);
-
-  jlst_init();
-  
-  while (1)
-  {
-    printf("> ");
-    Fgets(cmdline, MAXLINE, stdin);
-    strcpy(fg_cmd, cmdline);
-    if (feof(stdin))
-      exit(0);
-
-    eval(cmdline);
-  }
-}
-
-void eval(char* cmdline)
+void eval()
 {
   char* argv[MAXARGS];
   char buf[MAXLINE];
   int bg;
   pid_t pid;
+  fgpgid = 0;
 
   strcpy(buf, cmdline);
   bg = parseline(buf, argv);
@@ -58,22 +28,24 @@ void eval(char* cmdline)
 	exit(0);
       }
     }
+
+    fgpgid = setpgid(pid, 0);
     
     if (!bg)
     {
-      Setpgid(pid, 0);
-      fgpgid = pid;
-      if (waitpid(pid, NULL, WUNTRACED) < 0)
-	unix_error("waitfg: waitpid error");
-      fgpgid = 0;
+      int stat;
+      waitpid(pid, &stat, WUNTRACED);
+      print_if_signaled(stat, pid);
     }
     else
     {
       printf("%d %s", pid, cmdline);
-      jlst_add(pid, cmdline);
-      Setpgid(pid, 0);
+      sigset_t prev_mask = block_signals();
+      jlst_add(pid, cmdline, RUNNING);
+      unblock_signals(prev_mask);
     }
   }
+  return;
 }
 
 int builtin_command(char** argv)
@@ -81,23 +53,23 @@ int builtin_command(char** argv)
   if (!strcmp(argv[0], "quit"))
   {
     jlst_del();
-    exit(0);  
+    exit(0);
   }
   if (!strcmp(argv[0], "&"))
     return 1;
-  if (!strcmp(argv[0], "jobs"))
-  {
-    jlst_print();
-    return 1;
-  }
   if (!strcmp(argv[0], "bg"))
   {
-    cont_proc(argv, 0);
+    proc_cont(argv, 1);
     return 1;
   }
   if (!strcmp(argv[0], "fg"))
   {
-    cont_proc(argv, 1);
+    proc_cont(argv, 0);
+    return 1;
+  }
+  if (!strcmp(argv[0], "jobs"))
+  {
+    jlst_print();
     return 1;
   }
   return 0;
@@ -106,9 +78,10 @@ int builtin_command(char** argv)
 int parseline(char* buf, char** argv)
 {
   char* delim;
-  int argc, bg;
+  int argc;
+  int bg;
 
-  buf[strlen(buf)-1] = ' ';
+  buf[strlen(buf) - 1] = ' ';
   while (*buf && (*buf == ' '))
     buf++;
 
@@ -121,6 +94,7 @@ int parseline(char* buf, char** argv)
     while (*buf && (*buf == ' '))
       buf++;
   }
+
   argv[argc] = NULL;
 
   if (!argc)
@@ -132,101 +106,113 @@ int parseline(char* buf, char** argv)
   return bg;
 }
 
-void sigint_handler(int sig)
+void proc_cont(char** argv, int bg)
 {
-  if (fgpgid > 0)
-  {
-    Kill(-fgpgid, SIGINT);
-    jlst_rem(fgpgid);
-  }
-}
-
-void sigtstp_handler(int sig)
-{
-  if (fgpgid > 0)
-  {
-    Kill(-fgpgid, SIGTSTP);
-    jlst_add(fgpgid, fg_cmd);
-    (jlst_getp(fgpgid))->stat = STOPPED;
-  }
-}
-
-void cont_proc(char** argv, int g)
-{
-  int id, proc_status;
-  job* jb;
-    
   if (!argv[1])
   {
-    char* usg_str = g ? "Usage: fg %(jid) OR fg (pid)" : "Usage: bg %(jid) OR bg (pid)";
-    printf("%s\n", usg_str);
+    char* usg_str = bg ? "Usage: bg %(jid) OR bg (pid)\n" : "Usage: fg %(jid) OR fg (pid)\n";
+    printf("%s", usg_str);
+    return;
   }
-  else if (argv[1][0] == '%')
+
+  int is_jid = (argv[1][0] == '%');
+  int id = is_jid ? atoi(argv[1] + 1) : atoi(argv[1]);
+
+  if (!id)
   {
-    if (!(id = atoi(argv[1] + 1)))
-      printf("Invalid argument: %s\n", argv[1]);
-    else
-    {
-      jb = jlst_get(id);
-      if (jb)
-      {
-       jb->stat = RUNNING;
-       Kill(jb->pid, SIGCONT);
-       if (g)
-       {
-	 fgpgid = jb->pid;
-	 Waitpid(jb->pid, &proc_status, WUNTRACED);
-	 fgpgid = 0;
-       }
-	 
-      }
-      else
-	printf("Job not found\n");
-    }
+    printf("Invalid argument.\n");
+    return;
   }
-  else
+
+  sigset_t prev_mask = block_signals();
+  
+  job* jb = is_jid ? jlst_get(id) : jlst_getp(id);
+
+  if (!jb)
   {
-    if (!(id = atoi(argv[1])))
-      printf("Invalid argument: %s\n", argv[1]);
-    else
-    {
-      jb = jlst_getp(id);
-      if (jb)
-      {
-       jb->stat = RUNNING;
-       Kill(jb->pid, SIGCONT);
-       if (g)
-       {
-	 fgpgid = jb->pid;
-	 Waitpid(jb->pid, &proc_status, WUNTRACED);
-	 fgpgid = 0;
-       }
-	 
-      }
-      else
-	printf("Job not found\n");
-    }
+    unblock_signals(prev_mask);
+    printf("Job not found.\n");
+    return;
   }
+
+  Kill(jb->pid, SIGCONT);
+  jb->stat = RUNNING;
+
+  if (bg)
+  {
+    unblock_signals(prev_mask);
+    return;
+  }
+
+  fgpgid = jb->pid;
+  jlst_rem(jb->pid);
+  unblock_signals(prev_mask);
+
+  int stat;
+  waitpid(fgpgid, &stat, WUNTRACED);
+  print_if_signaled(stat, fgpgid);
+}
+
+sigset_t block_signals()
+{
+  sigset_t mask, prev_mask;
+    
+  Sigfillset(&mask);
+  Sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+
+  return prev_mask;
+}
+
+void unblock_signals(sigset_t prev_mask)
+{
+  Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+}
+
+void print_if_signaled(int stat, pid_t pid)
+{
+  if (WIFSIGNALED(stat))
+  {
+    char err_buf[128];
+    sprintf(err_buf, "Child %d terminated by signal %d", pid, WTERMSIG(stat));
+    psignal(WTERMSIG(stat), err_buf);
+  }
+}
+
+void stop(int sig)
+{
+  if (fgpgid)
+  {
+    Kill(-fgpgid, SIGTSTP);
+    
+    sigset_t prev_mask = block_signals();
+
+    jlst_add(fgpgid, cmdline, STOPPED);
+    
+    unblock_signals(prev_mask);
+  }
+}
+
+void intr(int sig)
+{
+  if (fgpgid)
+    Kill(-fgpgid, SIGINT);
 }
 
 void reap(int sig)
 {
-  int proc_stat, olderrno = errno;
-  pid_t proc_id;
-
-  while ((proc_id = waitpid(-1, &proc_stat, 0)) > 0)
+  int olderrno = errno, stat;
+  sigset_t prev_mask;
+  pid_t pid;
+  
+  while ((pid = waitpid(-1, &stat, 0)) > 0)
   {
-    jlst_rem(proc_id);
-    if (WIFSIGNALED(proc_stat))
-    {
-      char buf[128];
-      sprintf(buf, "Process %d terminated by signal %d", proc_id, WTERMSIG(proc_stat));
-      psignal(WTERMSIG(proc_stat), buf);
-    }
+    prev_mask = block_signals();
+    jlst_rem(pid);
+    unblock_signals(prev_mask);
+    
+    print_if_signaled(stat, pid);
   }
-
   if (errno != ECHILD)
     Sio_error("waitpid error");
-  Sleep(1);
   errno = olderrno;
 }

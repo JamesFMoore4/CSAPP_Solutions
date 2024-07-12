@@ -1,3 +1,5 @@
+#ifndef JOBS_LIST
+#define JOBS_LIST
 #include "csapp.h"
 
 typedef int jid_t;
@@ -20,13 +22,13 @@ typedef struct
 
 void jlst_init();
 void jlst_del();
-void jlst_add(pid_t p, char* cmd);
+void jlst_add(pid_t p, char* cmd, job_status status);
 int jlst_rem(pid_t p);
 job* jlst_get(jid_t j);
 job* jlst_getp(pid_t p);
 void jlst_print();
 static void jlst_err(char* msg);
 
-
+#endif
 
 

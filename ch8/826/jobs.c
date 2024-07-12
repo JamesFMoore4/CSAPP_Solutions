@@ -24,14 +24,14 @@ void jlst_del()
   free(jlst);
 }
 
-void jlst_add(pid_t p, char* cmd)
+void jlst_add(pid_t p, char* cmd, job_status status)
 {
   job* jb = (job*)malloc(sizeof(job));
   if (!jb)
     jlst_err("Could not add job.\n");
   jb->pid = p;
   jb->jid = jlst_cntr;
-  jb->stat = RUNNING;
+  jb->stat = status;
   jb->cmdline = (char*)malloc(strlen(cmd) + 1);
   if (!jb->cmdline)
     jlst_err("String allocation error.\n");
