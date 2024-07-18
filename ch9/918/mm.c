@@ -285,11 +285,16 @@ static void place(void *bp, size_t asize)
     if ((csize - asize) >= (2*DSIZE)) { 
         PUT(HDRP(bp), PACK(asize, 1));
         bp = NEXT_BLKP(bp);
-        PUT(HDRP(bp), PACK(csize-asize, 0));
-        PUT(FTRP(bp), PACK(csize-asize, 0));
+        PUT(HDRP(bp), PACK(csize-asize, 0x2));
+        PUT(FTRP(bp), PACK(csize-asize, 0x2));
     }
     else
+    {
         PUT(HDRP(bp), PACK(csize, 1));
+	bp = NEXT_BLKP(bp);
+	PUT(HDRP(bp), PACK(GET(HDRP(bp)), 0x2));
+    }
+     
 }
 /* $end mmplace */
 
