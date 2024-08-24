@@ -8,16 +8,17 @@
  */
 #include "../../include/csapp.h"
 
-typedef enum {GET, HEAD} rq_type;
+typedef enum {GET, HEAD, POST} rq_type;
 
 void doit(int fd);
-void read_requesthdrs(rio_t *rp, int fd);
+void read_requesthdrs(rio_t *rp, int fd, char* cgiargs_p);
 int parse_uri(char *uri, char *filename, char *cgiargs);
 void serve_static(int fd, char *filename, int filesize, rq_type type);
 void get_filetype(char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, 
 		 char *shortmsg, char *longmsg);
+rq_type http_method(char* method);
 void sigchld_handler(int sig);
 
 int main(int argc, char **argv) 
@@ -57,8 +58,10 @@ void doit(int fd)
     int is_static;
     struct stat sbuf;
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-    char filename[MAXLINE], cgiargs[MAXLINE];
+    char filename[MAXLINE], cgiargs[MAXLINE], cgiargs_p[MAXLINE];
+    char* ptr;
     rio_t rio;
+    rq_type type;
 
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
@@ -66,12 +69,14 @@ void doit(int fd)
         return;
     printf("%s", buf);
     sscanf(buf, "%s %s %s", method, uri, version);       //line:netp:doit:parserequest
-    if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")) {    // Homework problem 11.11, add support for http HEAD method
+    if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD") && strcasecmp(method, "POST")) {    // Homework problem 11.11, add support for http HEAD method
         clienterror(fd, method, "501", "Not Implemented",
                     "Tiny does not implement this method");
         return;
     }                                                    //line:netp:doit:endrequesterr
-    read_requesthdrs(&rio, fd);                              //line:netp:doit:readrequesthdrs
+    type = http_method(method);
+    ptr = type == POST ? cgiargs_p : NULL;
+    read_requesthdrs(&rio, fd, ptr);                              //line:netp:doit:readrequesthdrs
 
     /* Parse URI from GET request */
     is_static = parse_uri(uri, filename, cgiargs);       //line:netp:doit:staticcheck
@@ -87,7 +92,6 @@ void doit(int fd)
 			"Tiny couldn't read the file");
 	    return;
 	}
-	rq_type type = !strcasecmp(method, "GET") ? GET : HEAD;
 	serve_static(fd, filename, sbuf.st_size, type);        //line:netp:doit:servestatic
     }
     else { /* Serve dynamic content */
@@ -96,7 +100,8 @@ void doit(int fd)
 			"Tiny couldn't run the CGI program");
 	    return;
 	}
-	serve_dynamic(fd, filename, cgiargs);            //line:netp:doit:servedynamic
+	ptr = type == POST ? cgiargs_p : cgiargs;
+	serve_dynamic(fd, filename, ptr);            //line:netp:doit:servedynamic
     }
 }
 /* $end doit */
@@ -105,15 +110,17 @@ void doit(int fd)
  * read_requesthdrs - read HTTP request headers
  */
 /* $begin read_requesthdrs */
-void read_requesthdrs(rio_t *rp, int fd) 
+void read_requesthdrs(rio_t *rp, int fd, char* cgiargs_p) 
 {
     char buf[MAXLINE];
 
     Rio_readlineb(rp, buf, MAXLINE);
     printf("%s", buf);
     while(strcmp(buf, "\r\n")) {          //line:netp:readhdrs:checkterm
-	Rio_readlineb(rp, buf, MAXLINE);
+	Rio_readlineb(rp, buf, MAXLINE);	
 	printf("%s", buf);
+	if (!strstr(buf, ":")) // Argument string in POST method body
+	  strcpy(cgiargs_p, buf);
 	Rio_writen(fd, buf, strlen(buf)); // Homework problem 11.6, echo request header lines
     }
     return;
@@ -257,6 +264,16 @@ void clienterror(int fd, char *cause, char *errnum,
     Rio_writen(fd, buf, strlen(buf));
 }
 /* $end clienterror */
+
+rq_type http_method(char* method)
+{
+  if (!strcasecmp(method, "GET"))
+    return GET;
+  if (!strcasecmp(method, "HEAD"))
+    return HEAD;
+  if (!strcasecmp(method, "POST"))
+    return POST;
+}
 
 // Homework problem 11.8, modify TINY so that it reaps children inside a SIGCHLD handler
 void sigchld_handler(int sig)
