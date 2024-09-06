@@ -6,8 +6,19 @@
  * Updated 11/2019 droh 
  *   - Fixed sprintf() aliasing issue in serve_static(), and clienterror().
  */
-#include "csapp.h"
+#include "../../include/csapp.h"
+#include "../../include/sbuf.h"
 
+#define SBUFSIZE 16
+#define MINTHREADS 2
+#define MAXTHREADS SBUFSIZE
+
+typedef struct
+{
+  pthread_t tid;
+  sem_t idle;
+} thrinfo;
+  
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
@@ -16,13 +27,21 @@ void get_filetype(char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, 
 		 char *shortmsg, char *longmsg);
+void* thread(void* vargp);
+void inc_tcnt(void);
+void dec_tcnt(void);
+
+sbuf_t sbuf;
+thrinfo threads[MAXTHREADS];
+unsigned int tcnt;
 
 int main(int argc, char **argv) 
 {
-    int listenfd, connfd;
+    int listenfd, connfd, i, num_items, num_slots;
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
+
 
     /* Check command line args */
     if (argc != 2) {
@@ -31,17 +50,101 @@ int main(int argc, char **argv)
     }
 
     listenfd = Open_listenfd(argv[1]);
+
+    for (i = 0; i < MAXTHREADS; i++)
+    {
+      sem_init(&threads[i].idle, 0, 1);
+      threads[i].tid = 0;
+    }
+
+    sbuf_init(&sbuf, SBUFSIZE);
+    for (i = 0; i < MINTHREADS; i++)
+      pthread_create(&(threads[i].tid), NULL, thread, (void*)&threads[i].idle);
+    tcnt = MINTHREADS;
+      
     while (1) {
 	clientlen = sizeof(clientaddr);
 	connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:tiny:accept
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
                     port, MAXLINE, 0);
         printf("Accepted connection from (%s, %s)\n", hostname, port);
-	doit(connfd);                                             //line:netp:tiny:doit
-	Close(connfd);                                            //line:netp:tiny:close
+	sbuf_insert(&sbuf, connfd);
+
+	sem_getvalue(&sbuf.items, &num_items);
+	sem_getvalue(&sbuf.slots, &num_slots);
+	
+	if (num_items == SBUFSIZE)
+	  inc_tcnt();
+	else if (!num_slots)
+	  dec_tcnt();
     }
 }
 /* $end tinymain */
+
+void* thread(void* vargp)
+{
+  int connfd;
+  sem_t* idle;
+
+  idle = (sem_t*)vargp;
+  
+  pthread_detach(pthread_self());
+  while (1)
+  {
+    connfd = sbuf_remove(&sbuf);
+    P(idle);
+    doit(connfd);
+    Close(connfd);
+    V(idle);
+  }
+}
+
+void inc_tcnt(void)
+{
+  unsigned int i, j, new_cnt, diff;
+
+  new_cnt = tcnt * 2;
+  diff = new_cnt - tcnt;
+  
+  if (new_cnt > MAXTHREADS)
+    return;
+
+  for (i = 0, j = 0; i < MAXTHREADS && j < diff; i++)
+  {
+    if (!(threads[i].tid))
+    {
+      pthread_create(&threads[i].tid, NULL, thread, (void*)&threads[i].idle);
+      j++;
+    }
+  }
+
+  tcnt *= 2;
+}
+
+void dec_tcnt(void)
+{
+  unsigned int i, j, new_cnt, diff;
+
+  new_cnt = tcnt / 2;
+  diff = tcnt - new_cnt;
+
+  if (new_cnt < MINTHREADS)
+    return;
+
+  for (i = 0, j = 0; i < MAXTHREADS && j < diff; i++)
+  {
+    if (threads[i].tid)
+    {
+      P(&threads[i].idle);
+      pthread_cancel(threads[i].tid);
+      V(&threads[i].idle);
+      threads[i].tid = 0;
+      j++;
+    }
+  }
+
+  tcnt /= 2;
+}
 
 /*
  * doit - handle one HTTP request/response transaction
@@ -152,7 +255,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
 void serve_static(int fd, char *filename, int filesize)
 {
     int srcfd;
-    char *srcp, filetype[MAXLINE], buf[MAXBUF];
+    char *srcp, filetype[MAXLINE], buf[MAXBUF*2];
 
     /* Send response headers to client */
     get_filetype(filename, filetype);    //line:netp:servestatic:getfiletype
